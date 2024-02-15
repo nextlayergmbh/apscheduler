@@ -28,6 +28,7 @@ class CronTrigger(BaseTrigger):
     :param datetime.tzinfo|str timezone: time zone to use for the date/time calculations (defaults
         to scheduler timezone)
     :param int|None jitter: delay the job execution by ``jitter`` seconds at most
+    :param datetime.timedelta|int offset: time offset to be added to the resulting trigger time
 
     .. note:: The first weekday is always **monday**.
     """
@@ -44,11 +45,11 @@ class CronTrigger(BaseTrigger):
         'second': BaseField
     }
 
-    __slots__ = 'timezone', 'start_date', 'end_date', 'fields', 'jitter'
+    __slots__ = 'timezone', 'start_date', 'end_date', 'fields', 'jitter', 'offset'
 
     def __init__(self, year=None, month=None, day=None, week=None, day_of_week=None, hour=None,
                  minute=None, second=None, start_date=None, end_date=None, timezone=None,
-                 jitter=None):
+                 jitter=None, offset=None):
         if timezone:
             self.timezone = astimezone(timezone)
         elif isinstance(start_date, datetime) and start_date.tzinfo:
@@ -62,6 +63,18 @@ class CronTrigger(BaseTrigger):
         self.end_date = convert_to_datetime(end_date, self.timezone, 'end_date')
 
         self.jitter = jitter
+
+        if offset is None:
+            self.offset = timedelta(seconds=0)
+        elif isinstance(offset, timedelta):
+            self.offset = offset
+        elif isinstance(offset, six.integer_types):
+            self.offset = timedelta(seconds=offset)
+        else:
+            try:
+                self.offset = timedelta(seconds=int(offset))
+            except Exception as e:
+                raise TypeError('Invalid offset: {0!r}'.format(offset)) from e
 
         values = dict((key, value) for (key, value) in six.iteritems(locals())
                       if key in self.FIELD_NAMES and value is not None)
@@ -167,6 +180,9 @@ class CronTrigger(BaseTrigger):
         else:
             start_date = max(now, self.start_date) if self.start_date else now
 
+        # the cron-calculation shouldn't know about the offset, we'll add it on return-value again
+        start_date -= self.offset
+
         fieldnum = 0
         next_date = datetime_ceil(start_date).astimezone(self.timezone)
         while 0 <= fieldnum < len(self.fields):
@@ -189,12 +205,12 @@ class CronTrigger(BaseTrigger):
                 fieldnum += 1
 
             # Return if the date has rolled past the end date
-            if self.end_date and next_date > self.end_date:
+            if self.end_date and next_date + self.offset > self.end_date:
                 return None
 
         if fieldnum >= 0:
             next_date = self._apply_jitter(next_date, self.jitter, now)
-            return min(next_date, self.end_date) if self.end_date else next_date
+            return min(next_date, self.end_date) if self.end_date else next_date + self.offset
 
     def __getstate__(self):
         return {
@@ -204,6 +220,7 @@ class CronTrigger(BaseTrigger):
             'end_date': self.end_date,
             'fields': self.fields,
             'jitter': self.jitter,
+            'offset': self.offset,
         }
 
     def __setstate__(self, state):
@@ -221,15 +238,20 @@ class CronTrigger(BaseTrigger):
         self.end_date = state['end_date']
         self.fields = state['fields']
         self.jitter = state.get('jitter')
+        self.offset = state.get('offset')
 
     def __str__(self):
         options = ["%s='%s'" % (f.name, f) for f in self.fields if not f.is_default]
+        if self.offset:
+            options.append("offset=%d" % self.offset.total_seconds())
         return 'cron[%s]' % (', '.join(options))
 
     def __repr__(self):
         options = ["%s='%s'" % (f.name, f) for f in self.fields if not f.is_default]
         if self.start_date:
             options.append("start_date=%r" % datetime_repr(self.start_date))
+        if self.offset:
+            options.append("offset='%s'" % repr(self.offset))
         if self.end_date:
             options.append("end_date=%r" % datetime_repr(self.end_date))
         if self.jitter:
